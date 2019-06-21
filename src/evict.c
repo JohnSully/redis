@@ -488,8 +488,10 @@ int freeMemoryIfNeeded(void) {
                  * every DB. */
                 for (i = 0; i < server.dbnum; i++) {
                     db = server.db+i;
-                    dict = (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) ?
-                            db->dict : db->expires;
+                    // TODO
+                    dict = db->dict;
+                    /*dict = (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) ?
+                            db->dict : db->expires;*/
                     if ((keys = dictSize(dict)) != 0) {
                         evictionPoolPopulate(i, dict, db->dict, pool);
                         total_keys += keys;
@@ -502,13 +504,14 @@ int freeMemoryIfNeeded(void) {
                     if (pool[k].key == NULL) continue;
                     bestdbid = pool[k].dbid;
 
-                    if (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) {
+                    // TODO
+                    //if (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) {
                         de = dictFind(server.db[pool[k].dbid].dict,
                             pool[k].key);
-                    } else {
-                        de = dictFind(server.db[pool[k].dbid].expires,
-                            pool[k].key);
-                    }
+                    //} else {
+                    //    de = dictFind(server.db[pool[k].dbid].expires,
+                    //        pool[k].key);
+                    //}
 
                     /* Remove the entry from the pool. */
                     if (pool[k].key != pool[k].cached)
@@ -538,8 +541,10 @@ int freeMemoryIfNeeded(void) {
             for (i = 0; i < server.dbnum; i++) {
                 j = (++next_db) % server.dbnum;
                 db = server.db+j;
-                dict = (server.maxmemory_policy == MAXMEMORY_ALLKEYS_RANDOM) ?
-                        db->dict : db->expires;
+                // TODO
+                dict = db->dict;
+                //dict = (server.maxmemory_policy == MAXMEMORY_ALLKEYS_RANDOM) ?
+                //        db->dict : db->expires;
                 if (dictSize(dict) != 0) {
                     de = dictGetRandomKey(dict);
                     bestkey = dictGetKey(de);

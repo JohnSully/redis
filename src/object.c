@@ -44,6 +44,7 @@ robj *createObject(int type, void *ptr) {
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
     o->refcount = 1;
+    o->expire = 0;
 
     /* Set the LRU to the current lruclock (minutes resolution), or
      * alternatively the LFU counter. */
@@ -94,6 +95,7 @@ robj *createEmbeddedStringObject(const char *ptr, size_t len) {
     } else {
         o->lru = LRU_CLOCK();
     }
+    o->expire = 0;
 
     sh->len = len;
     sh->alloc = len;
@@ -1052,8 +1054,7 @@ struct redisMemOverhead *getMemoryOverheadData(void) {
         mh->db[mh->num_dbs].overhead_ht_main = mem;
         mem_total+=mem;
 
-        mem = dictSize(db->expires) * sizeof(dictEntry) +
-              dictSlots(db->expires) * sizeof(dictEntry*);
+        mem = db->cexpiresAlloc * sizeof(expireEntry);
         mh->db[mh->num_dbs].overhead_ht_expires = mem;
         mem_total+=mem;
 

@@ -51,10 +51,15 @@
  *
  * The parameter 'now' is the current time in milliseconds as is passed
  * to the function to avoid too many gettimeofday() syscalls. */
-int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
-    long long t = dictGetSignedIntegerVal(de);
-    if (now > t) {
-        sds key = dictGetKey(de);
+int activeExpireCycleTryExpire(redisDb *db, int iexpire, long long now) {
+    if (db->vecexpire[iexpire].key == NULL)
+    {
+        db->expireFragmentation--;
+        return 1;   // dummy val
+    }
+    long long t = db->vecexpire[iexpire].when;
+    if (now >= t) {
+        sds key = db->vecexpire[iexpire].key;
         robj *keyobj = createStringObject(key,sdslen(key));
 
         propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
@@ -158,60 +163,33 @@ void activeExpireCycle(int type) {
         /* Continue to expire if at the end of the cycle more than 25%
          * of the keys were expired. */
         do {
-            unsigned long num, slots;
-            long long now, ttl_sum;
-            int ttl_samples;
+            unsigned long num;
+            long long now;
             iteration++;
+            now = mstime();
 
             /* If there is nothing to expire try next DB ASAP. */
-            if ((num = dictSize(db->expires)) == 0) {
+            if (((num = db->cexpires) == 0) || (db->vecexpire[0].when > now))
+            {
+                // TODO: Compute db->avg_ttl somewhere... but probably not here
                 db->avg_ttl = 0;
                 break;
             }
-            slots = dictSlots(db->expires);
-            now = mstime();
-
-            /* When there are less than 1% filled slots getting random
-             * keys is expensive, so stop here waiting for better times...
-             * The dictionary will be resized asap. */
-            if (num && slots > DICT_HT_INITIAL_SIZE &&
-                (num*100/slots < 1)) break;
 
             /* The main collection cycle. Sample random keys among keys
              * with an expire set, checking for expired ones. */
-            expired = 0;
-            ttl_sum = 0;
-            ttl_samples = 0;
-
             if (num > ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP)
                 num = ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP;
 
-            while (num--) {
-                dictEntry *de;
-                long long ttl;
-
-                if ((de = dictGetRandomKey(db->expires)) == NULL) break;
-                ttl = dictGetSignedIntegerVal(de)-now;
-                if (activeExpireCycleTryExpire(db,de,now)) expired++;
-                if (ttl > 0) {
-                    /* We want the average TTL of keys yet not expired. */
-                    ttl_sum += ttl;
-                    ttl_samples++;
-                }
-                total_sampled++;
+            for (expired = 0; expired < (int)num; ++expired)
+            {
+                if (!activeExpireCycleTryExpire(db, expired, now))
+                    break;
             }
+            db->cexpires -= expired;
+            memmove(db->vecexpire, db->vecexpire + expired, sizeof(expireEntry) * db->cexpires);
+            
             total_expired += expired;
-
-            /* Update the average TTL stats for this database. */
-            if (ttl_samples) {
-                long long avg_ttl = ttl_sum/ttl_samples;
-
-                /* Do a simple running average with a few samples.
-                 * We just use the current estimate with a weight of 2%
-                 * and the previous estimate with a weight of 98%. */
-                if (db->avg_ttl == 0) db->avg_ttl = avg_ttl;
-                db->avg_ttl = (db->avg_ttl/50)*49 + (avg_ttl/50);
-            }
 
             /* We can't block forever here even if there are many keys to
              * expire. So after a given amount of milliseconds return to the
@@ -283,6 +261,7 @@ dict *slaveKeysWithExpire = NULL;
 /* Check the set of keys created by the master with an expire set in order to
  * check if they should be evicted. */
 void expireSlaveKeys(void) {
+#if 0   // TODO
     if (slaveKeysWithExpire == NULL ||
         dictSize(slaveKeysWithExpire) == 0) return;
 
@@ -337,6 +316,7 @@ void expireSlaveKeys(void) {
         if ((cycles % 64) == 0 && mstime()-start > 1) break;
         if (dictSize(slaveKeysWithExpire) == 0) break;
     }
+#endif
 }
 
 /* Track keys that received an EXPIRE or similar command in the context

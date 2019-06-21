@@ -1091,6 +1091,32 @@ int rdbSaveInfoAuxFields(rio *rdb, int flags, rdbSaveInfo *rsi) {
     return 1;
 }
 
+int saveKey(rio *rdb, int flags, size_t *processed, sds keystr, robj *o)
+{    
+    robj key;
+    long long expire;
+
+    initStaticStringObject(key,keystr);
+    if (o->expire)
+        expire = o->expire;
+    else
+        expire = -1;
+
+    if (rdbSaveKeyValuePair(rdb,&key,o,expire) == -1)
+        return 0;
+
+    /* When this RDB is produced as part of an AOF rewrite, move
+        * accumulated diff from parent to child while rewriting in
+        * order to have a smaller final write. */
+    if (flags & RDB_SAVE_AOF_PREAMBLE &&
+        rdb->processed_bytes > *processed+AOF_READ_DIFF_INTERVAL_BYTES)
+    {
+        *processed = rdb->processed_bytes;
+        aofReadDiffFromParent();
+    }
+    return 1;
+}
+
 /* Produces a dump of the database in RDB format sending it to the specified
  * Redis I/O channel. On success C_OK is returned, otherwise C_ERR
  * is returned and part of the output, or all the output, can be
@@ -1129,30 +1155,34 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
          * these sizes are just hints to resize the hash tables. */
         uint64_t db_size, expires_size;
         db_size = dictSize(db->dict);
-        expires_size = dictSize(db->expires);
+        expires_size = db->cexpires;
         if (rdbSaveType(rdb,RDB_OPCODE_RESIZEDB) == -1) goto werr;
         if (rdbSaveLen(rdb,db_size) == -1) goto werr;
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
 
+        /* Iterate over expire entries saving them out in order */
+        long long expireCur = LLONG_MIN;
+        for (size_t iexp = 0; iexp < db->cexpires; ++iexp)
+        {
+            serverAssert(expireCur <= db->vecexpire[iexp].when);
+            expireCur = db->vecexpire[iexp].when;
+            if (db->vecexpire[iexp].val != NULL)
+            {
+                if (!saveKey(rdb, flags, &processed, db->vecexpire[iexp].key, db->vecexpire[iexp].val))
+                    goto werr;
+            }
+        }
+
         /* Iterate this DB writing every entry */
         while((de = dictNext(di)) != NULL) {
             sds keystr = dictGetKey(de);
-            robj key, *o = dictGetVal(de);
-            long long expire;
+            robj *o = dictGetVal(de);
 
-            initStaticStringObject(key,keystr);
-            expire = getExpire(db,&key);
-            if (rdbSaveKeyValuePair(rdb,&key,o,expire) == -1) goto werr;
+            if (o->expire)
+                continue;   // already saved
 
-            /* When this RDB is produced as part of an AOF rewrite, move
-             * accumulated diff from parent to child while rewriting in
-             * order to have a smaller final write. */
-            if (flags & RDB_SAVE_AOF_PREAMBLE &&
-                rdb->processed_bytes > processed+AOF_READ_DIFF_INTERVAL_BYTES)
-            {
-                processed = rdb->processed_bytes;
-                aofReadDiffFromParent();
-            }
+            if (!saveKey(rdb, flags, &processed, keystr, o))
+                goto werr;
         }
         dictReleaseIterator(di);
         di = NULL; /* So that we don't release it again on error. */
@@ -1795,6 +1825,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, robj *key) {
     } else {
         rdbExitReportCorruptRDB("Unknown RDB encoding type %d",rdbtype);
     }
+    serverAssert(!o->expire);
     return o;
 }
 
@@ -1873,6 +1904,10 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
     long long lru_idle = -1, lfu_freq = -1, expiretime = -1, now = mstime();
     long long lru_clock = LRU_CLOCK();
 
+    dbBeginBulkInsert(db);
+    
+    long long expireLast = LLONG_MIN;
+    int fSorted = 1;
     while(1) {
         robj *key, *val;
 
@@ -1917,7 +1952,11 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
                     "databases. Exiting\n", server.dbnum);
                 exit(1);
             }
+            dbEndBulkInsert(db, fSorted);
+            expireLast = LLONG_MIN;
+            fSorted = 1;
             db = server.db+dbid;
+            dbBeginBulkInsert(db);
             continue; /* Read next opcode. */
         } else if (type == RDB_OPCODE_RESIZEDB) {
             /* RESIZEDB: Hint about the size of the keys in the currently
@@ -1928,7 +1967,6 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
             if ((expires_size = rdbLoadLen(rdb,NULL)) == RDB_LENERR)
                 goto eoferr;
             dictExpand(db->dict,db_size);
-            dictExpand(db->expires,expires_size);
             continue; /* Read next opcode. */
         } else if (type == RDB_OPCODE_AUX) {
             /* AUX: generic string-string fields. Use to add state to RDB
@@ -2037,7 +2075,12 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
             dbAdd(db,key,val);
 
             /* Set the expire time if needed */
-            if (expiretime != -1) setExpire(NULL,db,key,expiretime);
+            if (expiretime != -1)
+            {
+                fSorted = fSorted && (expireLast <= expiretime);
+                expireLast = expiretime;
+                setExpire(NULL,db,key,expiretime);
+            }
 
             /* Set usage information (for eviction). */
             objectSetLRUOrLFU(val,lfu_freq,lru_idle,lru_clock);
@@ -2053,6 +2096,9 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
         lfu_freq = -1;
         lru_idle = -1;
     }
+
+    dbEndBulkInsert(db, fSorted);
+    
     /* Verify the checksum if RDB version is >= 5 */
     if (rdbver >= 5) {
         uint64_t cksum, expected = rdb->cksum;

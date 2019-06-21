@@ -635,8 +635,9 @@ NULL
         stats = sdscat(stats,buf);
 
         stats = sdscatprintf(stats,"[Expires HT]\n");
-        dictGetStats(buf,sizeof(buf),server.db[dbid].expires);
-        stats = sdscat(stats,buf);
+        // TODO!
+        //dictGetStats(buf,sizeof(buf),server.db[dbid].expires);
+        //stats = sdscat(stats,buf);
 
         addReplyBulkSds(c,stats);
     } else if (!strcasecmp(c->argv[1]->ptr,"htstats-key") && c->argc == 3) {

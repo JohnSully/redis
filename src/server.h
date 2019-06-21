@@ -72,6 +72,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #include "sha1.h"
 #include "endianconv.h"
 #include "crc64.h"
+#include "arraylist.h"
 
 /* Error codes */
 #define C_OK                    0
@@ -635,16 +636,24 @@ typedef struct RedisModuleDigest {
 #define LRU_CLOCK_MAX ((1<<LRU_BITS)-1) /* Max value of obj->lru */
 #define LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
 
-#define OBJ_SHARED_REFCOUNT INT_MAX
+#define OBJ_SHARED_REFCOUNT (0x3FFFFFFF) 
 typedef struct redisObject {
     unsigned type:4;
     unsigned encoding:4;
     unsigned lru:LRU_BITS; /* LRU time (relative to global lru_clock) or
                             * LFU data (least significant 8 bits frequency
                             * and most significant 16 bits access time). */
-    int refcount;
+    unsigned refcount : 31;
+    unsigned expire : 1;
     void *ptr;
+    long long expirewhen;
 } robj;
+
+typedef struct expireEntry {
+    long long when;
+    sds key;
+    robj *val;
+} expireEntry;
 
 /* Macro used to initialize a Redis object allocated on the stack.
  * Note that this macro is taken near the structure definition to make sure
@@ -671,7 +680,12 @@ typedef struct clientReplyBlock {
  * database. The database number is the 'id' field in the structure. */
 typedef struct redisDb {
     dict *dict;                 /* The keyspace for this DB */
-    dict *expires;              /* Timeout of keys with a timeout set */
+    size_t cexpires;
+    size_t cexpiresAlloc;
+    size_t expireFragmentation;
+    expireEntry *vecexpire;
+    int bulkinsert;             /* bulk insert mode means we'll sort things at the end */
+
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
     dict *ready_keys;           /* Blocked keys that received a PUSH */
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
@@ -1988,6 +2002,8 @@ void emptyDbAsync(redisDb *db);
 void slotToKeyFlushAsync(void);
 size_t lazyfreeGetPendingObjectsCount(void);
 void freeObjAsync(robj *o);
+void dbBeginBulkInsert(redisDb *db);
+void dbEndBulkInsert(redisDb *db, int fSorted);
 
 /* API to get key arguments from commands */
 int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);

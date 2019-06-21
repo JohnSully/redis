@@ -54,7 +54,7 @@ size_t lazyfreeGetFreeEffort(robj *obj) {
 int dbAsyncDelete(redisDb *db, robj *key) {
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
-    if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
+    if (db->cexpires > 0) removeExpire(db,key);
 
     /* If the value is composed of a few allocations, to free in a lazy way
      * is actually just slower... So under a certain limit we just free
@@ -105,11 +105,15 @@ void freeObjAsync(robj *o) {
  * create a new empty set of hash tables and scheduling the old ones for
  * lazy freeing. */
 void emptyDbAsync(redisDb *db) {
-    dict *oldht1 = db->dict, *oldht2 = db->expires;
+    dict *oldht1 = db->dict;
+    // TODO, Actually free this ASYNC
+    zfree(db->vecexpire);
+    db->cexpires = 0;
+    db->cexpiresAlloc = 0;
     db->dict = dictCreate(&dbDictType,NULL);
-    db->expires = dictCreate(&keyptrDictType,NULL);
+    db->vecexpire = NULL;
     atomicIncr(lazyfree_objects,dictSize(oldht1));
-    bioCreateBackgroundJob(BIO_LAZY_FREE,NULL,oldht1,oldht2);
+    bioCreateBackgroundJob(BIO_LAZY_FREE,NULL,oldht1,NULL);
 }
 
 /* Empty the slots-keys map of Redis CLuster by creating a new empty one

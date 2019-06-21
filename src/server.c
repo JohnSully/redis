@@ -1415,8 +1415,6 @@ int htNeedsResize(dict *dict) {
 void tryResizeHashTables(int dbid) {
     if (htNeedsResize(server.db[dbid].dict))
         dictResize(server.db[dbid].dict);
-    if (htNeedsResize(server.db[dbid].expires))
-        dictResize(server.db[dbid].expires);
 }
 
 /* Our hash table implementation performs rehashing incrementally while
@@ -1430,11 +1428,6 @@ int incrementallyRehash(int dbid) {
     /* Keys dictionary */
     if (dictIsRehashing(server.db[dbid].dict)) {
         dictRehashMilliseconds(server.db[dbid].dict,1);
-        return 1; /* already used our millisecond for this loop... */
-    }
-    /* Expires */
-    if (dictIsRehashing(server.db[dbid].expires)) {
-        dictRehashMilliseconds(server.db[dbid].expires,1);
         return 1; /* already used our millisecond for this loop... */
     }
     return 0;
@@ -1859,7 +1852,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
             size = dictSlots(server.db[j].dict);
             used = dictSize(server.db[j].dict);
-            vkeys = dictSize(server.db[j].expires);
+            vkeys = server.db[j].cexpires;
             if (used || vkeys) {
                 serverLog(LL_VERBOSE,"DB %d: %lld keys (%lld volatile) in %lld slots HT.",j,used,vkeys,size);
                 /* dictPrintStats(server.dict); */
@@ -2763,7 +2756,11 @@ void initServer(void) {
     /* Create the Redis databases, and initialize other internal state. */
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
-        server.db[j].expires = dictCreate(&keyptrDictType,NULL);
+        server.db[j].bulkinsert = 0;
+        server.db[j].cexpires = 0;
+        server.db[j].cexpiresAlloc = 0;
+        server.db[j].expireFragmentation = 0;
+        server.db[j].vecexpire = NULL;
         server.db[j].blocking_keys = dictCreate(&keylistDictType,NULL);
         server.db[j].ready_keys = dictCreate(&objectKeyPointerValueDictType,NULL);
         server.db[j].watched_keys = dictCreate(&keylistDictType,NULL);
@@ -4331,7 +4328,7 @@ sds genRedisInfoString(char *section) {
             long long keys, vkeys;
 
             keys = dictSize(server.db[j].dict);
-            vkeys = dictSize(server.db[j].expires);
+            vkeys = server.db[j].cexpires;
             if (keys || vkeys) {
                 info = sdscatprintf(info,
                     "db%d:keys=%lld,expires=%lld,avg_ttl=%lld\r\n",
